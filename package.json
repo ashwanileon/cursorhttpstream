@@ -1,0 +1,18 @@
+{
+  "name": "hdhub4u-stremio-addon",
+  "version": "2.3.1",
+  "description": "Stremio addon scraping HDHub4u — based on WebStreamrMBG",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "axios": "^1.6.8",
+    "cheerio": "^1.0.0",
+    "express": "^4.18.3"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "license": "MIT"
+}
