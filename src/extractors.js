@@ -167,106 +167,91 @@ function hubCloudNavHeaders(ref) {
   return { ...HEADERS, Referer: ref, 'Upgrade-Insecure-Requests': '1', 'Sec-Fetch-Site': 'cross-site', 'Sec-Fetch-Mode': 'navigate', 'Sec-Fetch-Dest': 'document' };
 }
 
-// Fast hubcloud fetch: try direct axios + CF proxy in parallel (both fail fast ~2-3s)
-// Does NOT use FlareSolverr — that's a slow, serial last resort
-async function fetchHubCloudPageFast(pageUrl, ref) {
+const MAX_HUBCLOUD_CANDIDATES = 3;
+
+function isUsableHtml(html) {
+  return html && typeof html === 'string' && html.length > 200 && !html.includes('Just a moment...');
+}
+
+// Per URL: direct → CF worker (with Referer) → FlareSolverr (serial, one at a time)
+async function fetchHubCloudPage(pageUrl, ref) {
   const navHeaders = hubCloudNavHeaders(ref);
 
-  // Try direct axios
   try {
     const resp = await axios.get(pageUrl, { headers: navHeaders, httpsAgent: agent, timeout: 12000 });
-    if (resp.data && typeof resp.data === 'string' && resp.data.length > 200 && !resp.data.includes('cloudflare')) {
+    if (isUsableHtml(resp.data) && !resp.data.includes('cloudflare')) {
       return { html: resp.data, headers: navHeaders };
     }
   } catch (_) {}
 
-  // Try CF proxy
   try {
     const { fetchViaCfProxy } = require('./cf-proxy');
-    const proxyHtml = await fetchViaCfProxy(pageUrl);
-    if (proxyHtml && typeof proxyHtml === 'string' && proxyHtml.length > 200 && !proxyHtml.includes('cloudflare')) {
+    const proxyHtml = await fetchViaCfProxy(pageUrl, { headers: navHeaders });
+    if (isUsableHtml(proxyHtml) && !proxyHtml.includes('cloudflare')) {
       return { html: proxyHtml, headers: navHeaders };
     }
   } catch (_) {}
 
+  const { CONFIG } = require('./config');
+  if (CONFIG.FLARESOLVERR_ENDPOINT) {
+    try {
+      const { solveViaFlareSolverr } = require('./flaresolverr');
+      const solution = await solveViaFlareSolverr(pageUrl, { headers: navHeaders });
+      if (solution?.body && isUsableHtml(solution.body) && !solution.body.includes('cloudflare')) {
+        return { html: solution.body, headers: solution.headers || navHeaders };
+      }
+    } catch (_) {}
+  }
+
   return null;
 }
 
-// Slow hubcloud fetch: tries FlareSolverr on a SINGLE URL as last resort
-// Only called once at most (not parallelized) to avoid flooding FlareSolverr
-async function fetchHubCloudPageWithFS(pageUrl, ref) {
-  const navHeaders = hubCloudNavHeaders(ref);
-  try {
-    const { solveViaFlareSolverr } = require('./flaresolverr');
-    const solution = await solveViaFlareSolverr(pageUrl, { headers: navHeaders });
-    if (solution && solution.body && typeof solution.body === 'string' && solution.body.length > 200 && !solution.body.includes('cloudflare')) {
-      return { html: solution.body, headers: solution.headers || navHeaders };
-    }
-  } catch (_) {}
-  return null;
-}
-
-// Resolve a hubcloud URL by trying all domain TLD variants
-// Phase 1: Try ALL TLDs in parallel with FAST methods only (direct + CF proxy)
-// Phase 2: If all fail, try ONE TLD with FlareSolverr (serial, single attempt)
-async function resolveHubCloudUrl(url, referer) {
+function buildHubCloudCandidates(url) {
   let hostname, path;
   try {
     const parsed = new URL(url);
     hostname = parsed.hostname;
     path = parsed.pathname + parsed.search + parsed.hash;
   } catch (_) {
+    return [url];
+  }
+
+  const candidates = [url];
+  if (!hostname.includes('hubcloud')) return candidates;
+
+  const { CONFIG } = require('./config');
+  const currentTld = hostname.split('.').slice(-1)[0];
+  for (const domain of CONFIG.HUB_CLOUD_DOMAINS) {
+    if (candidates.length >= MAX_HUBCLOUD_CANDIDATES) break;
+    if (domain === hostname || domain.endsWith(`.${currentTld}`)) continue;
+    const candidate = `https://${domain}${path}`;
+    if (!candidates.includes(candidate)) candidates.push(candidate);
+  }
+  return candidates;
+}
+
+// Try a few hubcloud TLDs sequentially (avoids 20+ parallel CF/FS calls per link)
+async function resolveHubCloudUrl(url, referer) {
+  let path;
+  try {
+    path = new URL(url).pathname + new URL(url).search + new URL(url).hash;
+  } catch (_) {
     return { html: null };
   }
 
-  // If we already found a working hubcloud domain, try it first
-  if (workingHubCloudDomain && hostname.includes('hubcloud')) {
+  if (workingHubCloudDomain && url.includes('hubcloud')) {
     const cachedUrl = `https://${workingHubCloudDomain}${path}`;
-    const result = await fetchHubCloudPageFast(cachedUrl, referer);
-    if (result) return { html: result.html, finalUrl: cachedUrl };
-    // If cached domain fails, reset and try all TLDs
+    const cached = await fetchHubCloudPage(cachedUrl, referer);
+    if (cached) return { html: cached.html, finalUrl: cachedUrl };
     workingHubCloudDomain = null;
   }
 
-  // Build a list of URLs to try: the original + all domain variants
-  const candidates = [url];
-
-  if (hostname.includes('hubcloud')) {
-    const baseParts = hostname.split('.');
-    const hubIdx = baseParts.findIndex(p => p === 'hubcloud');
-    if (hubIdx !== -1 && hubIdx < baseParts.length - 1) {
-      const { CONFIG } = require('./config');
-      for (const domain of CONFIG.HUB_CLOUD_DOMAINS) {
-        const candidate = `https://${domain}${path}`;
-        if (candidate !== url) candidates.push(candidate);
-      }
+  for (const candidate of buildHubCloudCandidates(url)) {
+    const page = await fetchHubCloudPage(candidate, referer);
+    if (page) {
+      try { workingHubCloudDomain = new URL(candidate).hostname; } catch (_) {}
+      return { html: page.html, finalUrl: candidate };
     }
-  }
-
-  // Phase 1: Try ALL candidates in parallel with FAST methods only (direct + CF proxy)
-  // These fail fast (2-3s) for Cloudflare-blocked sites — no FS flooding
-  const fastResults = await Promise.allSettled(
-    candidates.map(candidate =>
-      fetchHubCloudPageFast(candidate, referer).then(pageData =>
-        pageData ? { html: pageData.html, finalUrl: candidate } : null
-      )
-    )
-  );
-
-  for (const r of fastResults) {
-    if (r.status === 'fulfilled' && r.value) {
-      // Cache the working domain for future requests
-      try { workingHubCloudDomain = new URL(r.value.finalUrl).hostname; } catch (_) {}
-      return r.value;
-    }
-  }
-
-  // Phase 2: Last resort — try FlareSolverr on the ORIGINAL URL only (single attempt)
-  // This is SERIAL (not parallel) to avoid flooding FlareSolverr
-  const fsResult = await fetchHubCloudPageWithFS(url, referer);
-  if (fsResult) {
-    try { workingHubCloudDomain = new URL(url).hostname; } catch (_) {}
-    return { html: fsResult.html, finalUrl: url };
   }
 
   return { html: null };
@@ -291,7 +276,7 @@ async function hubCloudExtractor(url, referer) {
       if (m && m[1]) {
         const previousUrl = curFinalUrl;
         curFinalUrl = m[1];
-        const nextPage = await fetchHubCloudPageFast(curFinalUrl, previousUrl);
+        const nextPage = await fetchHubCloudPage(curFinalUrl, previousUrl);
         if (nextPage) {
           curHtml = nextPage.html;
           curReferer = previousUrl;

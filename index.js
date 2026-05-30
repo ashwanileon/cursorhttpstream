@@ -29,7 +29,7 @@ const TOTAL_BUDGET = CONFIG.IS_SERVERLESS ? 115000 : 19000;
 
 app.get('/manifest.json', (_, res) => res.json({
   id: 'community.httpstreams.stremio',
-  version: '2.3.1',
+  version: '2.3.2',
   name: 'http streams',
   description: 'Multi-source streams from HDHub4u, 4KHDHub, ExtraFlix, MoviesDrives & UHDRodeo',
   resources: ['stream'],
@@ -221,7 +221,7 @@ app.get('/health', (_, res) => {
   res.json({
     status: 'ok',
     timestamp: Date.now(),
-    version: '2.3.1',
+    version: '2.3.2',
     ready: deployment.cfWorker || deployment.flareSolverr,
     deployment,
     hint: (!deployment.cfWorker && !deployment.flareSolverr)
@@ -231,7 +231,7 @@ app.get('/health', (_, res) => {
 });
 
 app.get('/livetest', async (req, res) => {
-  const out = { steps: {}, fixes: [], version: '2.3.1', deployment: getDeploymentStatus() };
+  const out = { steps: {}, fixes: [], version: '2.3.2', deployment: getDeploymentStatus() };
   if (!out.deployment.cfWorker && !out.deployment.flareSolverr) {
     out.fixes.push('⚠️ CF_WORKER_URL and FLARESOLVERR_ENDPOINT are unset — stream extraction will fail for HubCloud links');
   }
@@ -327,7 +327,7 @@ app.get('/', (req, res) => {
 </head><body><div class=card>
 <h1>🎬 http streams</h1>
 <p class=sub>Multi-source Stremio Addon · HubCloud · DriveHub · Hindi/Multi</p>
-<div><span class=badge>v2.3.1</span><span class=badge>HDHub4u</span><span class=badge>4KHDHub</span><span class=badge>ExtraFlix</span><span class=badge>MoviesDrives</span><span class=badge>UHDRodeo</span></div><br>
+<div><span class=badge>v2.3.2</span><span class=badge>HDHub4u</span><span class=badge>4KHDHub</span><span class=badge>ExtraFlix</span><span class=badge>MoviesDrives</span><span class=badge>UHDRodeo</span></div><br>
 <a class="btn bp" href="stremio://${host.replace(/^https?:\/\//, '')}/manifest.json">⚡ Install in Stremio</a>
 <a class="btn bs" href="/manifest.json">Manifest</a>
 <div class=url>${host}/manifest.json</div>

@@ -1,6 +1,6 @@
 {
   "name": "hdhub4u-stremio-addon",
-  "version": "2.3.1",
+  "version": "2.3.2",
   "description": "Stremio addon scraping HDHub4u — based on WebStreamrMBG",
   "main": "index.js",
   "scripts": {

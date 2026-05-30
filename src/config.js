@@ -24,15 +24,13 @@ const CONFIG = {
   IS_KOYEB: !!(process.env.KOYEB_APP_NAME || process.env.KOYEB_SERVICE_NAME),
   IS_SERVERLESS: !!(process.env.VERCEL || process.env.KOYEB_APP_NAME || process.env.KOYEB_SERVICE_NAME),
   // Common hubcloud domain variants to try — TLDs change frequently
+  // Only a few alternates — each link used to fan out to 8+ TLDs in parallel (403/530 storms)
   HUB_CLOUD_DOMAINS: [
     'hubcloud.dad',
-    'hubcloud.foo',
-    'hubcloud.bar',
     'hubcloud.ink',
     'hubcloud.to',
-    'hubcloud.one',
-    'hubcloud.site',
     'hubcloud.cyou',
+    'hubcloud.site',
   ],
 };
 

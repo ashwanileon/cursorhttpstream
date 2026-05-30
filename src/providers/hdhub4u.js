@@ -23,15 +23,15 @@ async function searchHDHub4u(query) {
       axios.get(url, { headers: HEADERS, httpsAgent: agent, timeout: 12000 }).then(r => r.data)
     ));
 
-    // If all axios attempts failed (Cloudflare blocked), try via CF Proxy
     const allDirectFailed = !pages.some(p => p.status === 'fulfilled' && p.value && p.value.length > 200 && !p.value.includes('cloudflare'));
-    if (allDirectFailed && CONFIG.CF_WORKER_URL) {
+
+    // FlareSolverr before CF worker (403-heavy on hdhub4u HTML search)
+    if (allDirectFailed && CONFIG.FLARESOLVERR_ENDPOINT) {
       try {
-        const { fetchViaCfProxy } = require('../cf-proxy');
-        const proxyResults = await Promise.allSettled(searchUrls.map(url =>
-          fetchViaCfProxy(url)
+        const fsResults = await Promise.allSettled(searchUrls.map(url =>
+          fetchWithFlareSolverrFallback(url)
         ));
-        for (const r of proxyResults) {
+        for (const r of fsResults) {
           if (r.status === 'fulfilled' && r.value) {
             pages.push({ status: 'fulfilled', value: r.value });
           }
@@ -39,13 +39,13 @@ async function searchHDHub4u(query) {
       } catch (_) {}
     }
 
-    // If still failing, try via FlareSolverr (solves JS challenges with a real browser)
-    if (allDirectFailed && CONFIG.FLARESOLVERR_ENDPOINT) {
+    if (allDirectFailed && CONFIG.CF_WORKER_URL && !pages.some(p => p.status === 'fulfilled' && p.value?.length > 200)) {
       try {
-        const fsResults = await Promise.allSettled(searchUrls.map(url =>
-          fetchWithFlareSolverrFallback(url)
+        const { fetchViaCfProxy } = require('../cf-proxy');
+        const proxyResults = await Promise.allSettled(searchUrls.map(url =>
+          fetchViaCfProxy(url, { headers: { Referer: CONFIG.MAIN_URL + '/' } })
         ));
-        for (const r of fsResults) {
+        for (const r of proxyResults) {
           if (r.status === 'fulfilled' && r.value) {
             pages.push({ status: 'fulfilled', value: r.value });
           }
@@ -141,32 +141,7 @@ async function searchViaTypeSense(query) {
     }
   }
 
-  // Phase 2: Try all variants via CF Proxy (5s timeout each — still relatively fast)
-  if (CONFIG.CF_WORKER_URL) {
-    const { fetchViaCfProxy } = require('../cf-proxy');
-    const proxyResults = await Promise.allSettled(
-      typeSenseVariants.map(async (variant) => {
-        const params = { q: query, query_by: 'post_title', per_page: 10, prefix: true };
-        const fullUrl = `${variant.baseUrl}${variant.path}?${new URLSearchParams(params).toString()}`;
-        const proxyResult = await fetchViaCfProxy(fullUrl);
-        if (proxyResult) {
-          try {
-            return { variant, data: JSON.parse(proxyResult) };
-          } catch (_) {}
-        }
-        return null;
-      })
-    );
-
-    for (const r of proxyResults) {
-      if (r.status === 'fulfilled' && r.value && r.value.data?.hits?.length) {
-        const parsed = parseTypeSenseResults(r.value.data, query);
-        if (parsed.length) return parsed;
-      }
-    }
-  }
-
-  // Phase 3: As a last resort, try FlareSolverr (slow — waits for challenge solving)
+  // Phase 2: FlareSolverr (works when CF worker gets 403 on search API)
   if (CONFIG.FLARESOLVERR_ENDPOINT) {
     for (const variant of typeSenseVariants) {
       const params = { q: query, query_by: 'post_title', per_page: 10, prefix: true };
@@ -177,7 +152,25 @@ async function searchViaTypeSense(query) {
       if (proxyResult) {
         try {
           const data = JSON.parse(proxyResult);
-          if (data && data.hits && data.hits.length) return parseTypeSenseResults(data, query);
+          if (data?.hits?.length) return parseTypeSenseResults(data, query);
+        } catch (_) {}
+      }
+    }
+  }
+
+  // Phase 3: CF worker proxy (often 403 on Typesense; kept as fallback)
+  if (CONFIG.CF_WORKER_URL) {
+    const { fetchViaCfProxy } = require('../cf-proxy');
+    for (const variant of typeSenseVariants) {
+      const params = { q: query, query_by: 'post_title', per_page: 10, prefix: true };
+      const fullUrl = `${variant.baseUrl}${variant.path}?${new URLSearchParams(params).toString()}`;
+      const proxyResult = await fetchViaCfProxy(fullUrl, {
+        headers: { Accept: 'application/json,text/plain,*/*', Referer: CONFIG.MAIN_URL + '/' },
+      });
+      if (proxyResult) {
+        try {
+          const data = JSON.parse(proxyResult);
+          if (data?.hits?.length) return parseTypeSenseResults(data, query);
         } catch (_) {}
       }
     }

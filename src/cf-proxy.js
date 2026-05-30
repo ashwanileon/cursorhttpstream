@@ -7,7 +7,22 @@ const cache = require('./cache');
 const CF_WORKER_URL = process.env.CF_WORKER_URL || '';
 const CACHE_TTL = 1800000; // 30 min cache
 const MAX_RETRIES = 2; // Retry transient failures
+const BLOCKED_STATUSES = new Set([403, 503, 530]);
 let missingWorkerWarned = false;
+const failLogCounts = new Map();
+
+function logProxyFailure(status, url, attempt, maxAttempts) {
+  let host = 'unknown';
+  try { host = new URL(url).hostname; } catch (_) {}
+  const key = `${status}:${host}`;
+  const count = (failLogCounts.get(key) || 0) + 1;
+  failLogCounts.set(key, count);
+  if (count > 2) return;
+  console.warn(
+    `[cf-proxy] HTTP ${status} for ${host} (attempt ${attempt}/${maxAttempts})` +
+    (count === 2 ? ' — further failures for this host suppressed' : '')
+  );
+}
 
 /**
  * Fetch a URL through our Cloudflare Worker proxy to bypass Cloudflare protection.
@@ -56,6 +71,7 @@ async function fetchViaCfProxy(url, options = {}) {
           timeout: 30000,
           responseType: 'text',
           transformResponse: [data => data],
+          validateStatus: () => true,
         };
 
         let response;
@@ -86,36 +102,46 @@ async function fetchViaCfProxy(url, options = {}) {
         const data = response.data;
         const status = response.status;
 
-        // Check if the worker returned a Cloudflare challenge
-        const isChallengeByStatus = status === 403 || status === 503;
+        if (status < 200 || status >= 300 || BLOCKED_STATUSES.has(status)) {
+          logProxyFailure(status, url, attempt + 1, MAX_RETRIES);
+          if ((status === 429 || status === 502) && attempt < MAX_RETRIES - 1) {
+            await new Promise(r => setTimeout(r, (attempt + 1) * 1500));
+            continue;
+          }
+          return null;
+        }
+
         const isChallengeByContent = typeof data === 'string' && (
           data.includes('Just a moment...') ||
           data.includes('__cf_chl_') ||
           data.includes('/cdn-cgi/challenge-platform') ||
-          data.includes('cf-browser-verification') ||
-          (status === 403 && data.length < 5000)
+          data.includes('cf-browser-verification')
         );
 
-        if (isChallengeByStatus || isChallengeByContent) {
-          console.warn(`[cf-proxy] ⚠️ Challenge present for ${url.substring(0, 60)} (status ${status})`);
-          return null; // Don't cache — will retry on next request
+        if (isChallengeByContent) {
+          logProxyFailure(403, url, attempt + 1, MAX_RETRIES);
+          return null;
         }
 
-        // Success! Cache and return
+        if (!data || (typeof data === 'string' && data.length < 50)) {
+          return null;
+        }
+
         return data;
       } catch (e) {
         const status = e.response?.status;
-        const isTransient = status === 429 || status === 502 || status === 503 || !status;
+        const isTransient = status === 429 || status === 502 || !status;
 
         if (status === 429) {
           console.warn(`[cf-proxy] Rate limited (429) — attempt ${attempt + 1}/${MAX_RETRIES}`);
         } else if (status === 502) {
-          console.warn(`[cf-proxy] Worker proxy error (502) — attempt ${attempt + 1}/${MAX_RETRIES} for: ${url.substring(0, 80)}`);
+          console.warn(`[cf-proxy] Worker proxy error (502) — attempt ${attempt + 1}/${MAX_RETRIES}`);
+        } else if (status) {
+          logProxyFailure(status, url, attempt + 1, MAX_RETRIES);
         } else {
-          console.error(`[cf-proxy] ${status ? `HTTP ${status}` : e.message} — attempt ${attempt + 1}/${MAX_RETRIES} for: ${url.substring(0, 80)}`);
+          console.warn(`[cf-proxy] ${e.message} — attempt ${attempt + 1}/${MAX_RETRIES}`);
         }
 
-        // Retry on transient errors
         if (isTransient && attempt < MAX_RETRIES - 1) {
           const delay = (attempt + 1) * 1500;
           await new Promise(r => setTimeout(r, delay));
